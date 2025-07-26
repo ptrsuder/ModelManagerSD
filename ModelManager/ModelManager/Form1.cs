@@ -308,7 +308,7 @@ namespace ModelManager
                     {
                         json = await File.ReadAllTextAsync(model.InfoJsonPath);
                         model.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                        if (!dialog.CancellationTokenSource.IsCancellationRequested && model.ThumbnailPath == null)
+                        if (!dialog.CancellationTokenSource.IsCancellationRequested && model.ThumbnailPath == placeholderCard)
                         {
                             dialog.StatusLabel.Text = $"Downloading thumbnail for {name}...";
                             Application.DoEvents();
