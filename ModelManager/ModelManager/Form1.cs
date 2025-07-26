@@ -4,6 +4,8 @@ using System.Net.Http.Json;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ModelManager
@@ -18,7 +20,12 @@ namespace ModelManager
         private ContextMenuStrip modelContextMenu;
         private ModelInfo? contextModel;
         private ModelInfo? currentModel;
-        private System.Windows.Forms.Timer trackbarTimer;
+        private System.Windows.Forms.Timer trackbarTimer;     
+
+        private static readonly string NoInfoMarker = "{\"no_model_info\":true}";
+
+        private enum ModelSortOrder { FilenameAsc, FilenameDesc, DateAsc, DateDesc, SizeAsc, SizeDesc }
+        private ModelSortOrder currentSortOrder = ModelSortOrder.FilenameAsc;
 
         public Form1()
         {
@@ -43,6 +50,10 @@ namespace ModelManager
             trackbarTimer.Stop();
             trackbarTimer.Start();
 
+            // Model name filter textbox           
+            txtModelNameFilter.PlaceholderText = "Model name";
+            txtModelNameFilter.TextChanged += (s, e) => ApplyFilters();           
+
             // Remove btnFilter from panelTop and Form1 controls
             // Add event handlers to filter controls
             cmbBaseModel.SelectedIndexChanged += (s, e) => ApplyFilters();
@@ -53,14 +64,7 @@ namespace ModelManager
             panelTop.Controls.Add(chkSearchSubfolders);
             panelTop.Controls.Add(dtpCreatedAfter);
             panelTop.Controls.Add(cmbBaseModel);
-            panelTop.Controls.Add(trackModelScale);
-            // Set locations for controls in panelTop
-            btnSelectFolder.Location = new Point(12, 12);
-            chkSearchSubfolders.Location = new Point(140, 12);
-            dtpCreatedAfter.Location = new Point(290, 16);
-            cmbBaseModel.Location = new Point(460, 16);
-            trackModelScale.Location = new Point(680, 8);
-            trackModelScale.Width = 100;
+            panelTop.Controls.Add(trackModelScale);          
 
             groupModelInfo.Resize += (s, e) => ShowModelInfo(currentModel);
         }
@@ -123,6 +127,7 @@ namespace ModelManager
             flowModels.Controls.Clear();
             DateTime createdAfter = dtpCreatedAfter.Value.Date;
             string baseModel = cmbBaseModel.SelectedItem?.ToString() ?? "All";
+            string nameFilter = txtModelNameFilter.Text.Trim().ToLowerInvariant();
             foreach (var model in models)
             {
                 if (model.Metadata == null) continue;
@@ -146,6 +151,12 @@ namespace ModelManager
                     if (!string.Equals(modelBaseModel, baseModel, StringComparison.OrdinalIgnoreCase))
                         continue;
                 }
+                // Filter by model name (from metadata or fallback to file name)
+                string displayName = model.Metadata.TryGetValue("name", out var metaName) && metaName is string s && !string.IsNullOrEmpty(s)
+                    ? s
+                    : model.Name;
+                if (!string.IsNullOrEmpty(nameFilter) && !displayName.ToLowerInvariant().Contains(nameFilter))
+                    continue;
                 filteredModels.Add(model);
             }
             DisplayModels(filteredModels);
@@ -222,6 +233,11 @@ namespace ModelManager
                 using var client = new HttpClient();
                 var url = $"https://civitai.com/api/v1/model-versions/by-hash/{hash}";
                 var response = await client.GetAsync(url);
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    await File.WriteAllTextAsync(infoPath, NoInfoMarker);
+                    return NoInfoMarker;
+                }
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -271,74 +287,142 @@ namespace ModelManager
             dialog.StartPosition = FormStartPosition.Manual;
             dialog.Location = GetCenterLocationForDialog(dialog);
             dialog.Show();
+            dialog.BringToFront();
+            dialog.TopMost = true;
             var cts = dialog.CancellationTokenSource;
             var modelExtensions = new[] { ".ckpt", ".safetensors", ".pt" };
             var searchOption = chkSearchSubfolders.Checked ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
             var files = Directory.GetFiles(folderPath, "*.*", searchOption);
-            int total = files.Count(f => modelExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+            var modelFiles = files.Where(f => modelExtensions.Contains(Path.GetExtension(f).ToLowerInvariant())).ToList();
+            int total = modelFiles.Count;
             dialog.ProgressBar.Maximum = total;
             models.Clear();
             flowModels.Controls.Clear();
             thumbnailCache.Clear();
             ClearModelInfo();
             int current = 0;
-            foreach (var file in files)
+            int maxDegreeOfParallelism = 4; // Optimal for IO-bound tasks
+            var semaphore = new SemaphoreSlim(maxDegreeOfParallelism);
+            var tasks = new List<Task>();
+            object progressLock = new object();
+            foreach (var file in modelFiles)
             {
-                var ext = Path.GetExtension(file).ToLowerInvariant();
-                if (!modelExtensions.Contains(ext)) continue;
-                current++;
-                dialog.ProgressBar.Value = current;
-                dialog.StatusLabel.Text = $"Processing {current} of {total}: {Path.GetFileName(file)}";
-                Application.DoEvents();
-                var name = Path.GetFileNameWithoutExtension(file);
-                var infoPath = Path.Combine(Path.GetDirectoryName(file) ?? folderPath, name + ".civitai.info");
-                var pngPath = Path.Combine(Path.GetDirectoryName(file) ?? folderPath, name + ".preview.png");
-                var model = new ModelInfo
+                await semaphore.WaitAsync();
+                if (dialog.CancellationTokenSource.IsCancellationRequested)
                 {
-                    FilePath = file,
-                    Name = name,
-                    Type = ext == ".ckpt" ? "Checkpoint" : ext == ".safetensors" ? "LoRA/Safetensors" : "Other",
-                    InfoJsonPath = File.Exists(infoPath) ? infoPath : null,
-                    ThumbnailPath = File.Exists(pngPath) ? pngPath : placeholderCard
-                };
-                string? json = null;
-                if (model.InfoJsonPath != null)
+                    semaphore.Release();
+                    break;
+                }
+                var task = Task.Run(async () =>
                 {
                     try
                     {
-                        json = await File.ReadAllTextAsync(model.InfoJsonPath);
-                        model.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                        if (!dialog.CancellationTokenSource.IsCancellationRequested && model.ThumbnailPath == placeholderCard)
+                        var ext = Path.GetExtension(file).ToLowerInvariant();
+                        var name = Path.GetFileNameWithoutExtension(file);
+                        var infoPath = Path.Combine(Path.GetDirectoryName(file) ?? folderPath, name + ".civitai.info");
+                        var pngPath = Path.Combine(Path.GetDirectoryName(file) ?? folderPath, name + ".preview.png");
+                        var model = new ModelInfo
                         {
-                            dialog.StatusLabel.Text = $"Downloading thumbnail for {name}...";
-                            Application.DoEvents();
-                            await DownloadThumbnailFromModelInfoAsync(model, pngPath);
-                        }
-                    }
-                    catch { }
-                }
-                else if (!dialog.CancellationTokenSource.IsCancellationRequested)
-                {
-                    dialog.StatusLabel.Text = $"Fetching info for {name}...";
-                    Application.DoEvents();
-                    json = await GetModelInfoFromApiAsync(file, infoPath);
-                    if (!string.IsNullOrEmpty(json))
-                    {
-                        model.InfoJsonPath = infoPath;
-                        try
+                            FilePath = file,
+                            Name = name,
+                            Type = ext == ".ckpt" ? "Checkpoint" : ext == ".safetensors" ? "LoRA/Safetensors" : "Other",
+                            InfoJsonPath = File.Exists(infoPath) ? infoPath : null,
+                            ThumbnailPath = File.Exists(pngPath) ? pngPath : placeholderCard
+                        };
+                        string? json = null;
+                        if (model.InfoJsonPath != null)
                         {
-                            model.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                            if (model.ThumbnailPath == null)
+                            try
                             {
-                                dialog.StatusLabel.Text = $"Downloading thumbnail for {name}...";
-                                Application.DoEvents();
-                                await DownloadThumbnailFromModelInfoAsync(model, pngPath);
+                                json = await File.ReadAllTextAsync(model.InfoJsonPath);
+                                if (json == NoInfoMarker)
+                                {
+                                    model.Metadata = null;
+                                }
+                                else
+                                {
+                                    model.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+                                    if (!dialog.CancellationTokenSource.IsCancellationRequested && model.ThumbnailPath == placeholderCard)
+                                    {
+                                        dialog.Invoke(new Action(() => dialog.StatusLabel.Text = $"Downloading thumbnail for {name}..."));
+                                        await DownloadThumbnailFromModelInfoAsync(model, pngPath);
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                        else if (!dialog.CancellationTokenSource.IsCancellationRequested)
+                        {
+                            dialog.Invoke(new Action(() => dialog.StatusLabel.Text = $"Fetching info for {name}..."));
+                            json = await GetModelInfoFromApiAsync(file, infoPath);
+                            if (!string.IsNullOrEmpty(json))
+                            {
+                                model.InfoJsonPath = infoPath;
+                                if (json == NoInfoMarker)
+                                {
+                                    model.Metadata = null;
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        model.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+                                        if (model.ThumbnailPath == placeholderCard)
+                                        {
+                                            dialog.Invoke(new Action(() => dialog.StatusLabel.Text = $"Downloading thumbnail for {name}..."));
+                                            await DownloadThumbnailFromModelInfoAsync(model, pngPath);
+                                        }
+                                    }
+                                    catch { }
+                                }
                             }
                         }
-                        catch { }
+                        lock (models)
+                        {
+                            models.Add(model);
+                        }
+                    }
+                    finally
+                    {
+                        int progressValue;
+                        lock (progressLock)
+                        {
+                            current++;
+                            progressValue = current;
+                        }
+                        dialog.Invoke(new Action(() => {
+                            dialog.ProgressBar.Value = progressValue;
+                            dialog.StatusLabel.Text = $"Processing {progressValue} of {total}: {Path.GetFileName(file)}";
+                        }));
+                        semaphore.Release();
+                    }
+                });
+                tasks.Add(task);
+            }
+            await Task.WhenAll(tasks);
+            // If cancelled, add any missing models as basic ModelInfo
+            if (dialog.CancellationTokenSource.IsCancellationRequested)
+            {
+                var processedFiles = new HashSet<string>(models.Select(m => m.FilePath));
+                foreach (var file in modelFiles)
+                {
+                    if (!processedFiles.Contains(file))
+                    {
+                        var ext = Path.GetExtension(file).ToLowerInvariant();
+                        var name = Path.GetFileNameWithoutExtension(file);
+                        var pngPath = Path.Combine(Path.GetDirectoryName(file) ?? folderPath, name + ".preview.png");
+                        var model = new ModelInfo
+                        {
+                            FilePath = file,
+                            Name = name,
+                            Type = ext == ".ckpt" ? "Checkpoint" : ext == ".safetensors" ? "LoRA/Safetensors" : "Other",
+                            InfoJsonPath = null,
+                            ThumbnailPath = File.Exists(pngPath) ? pngPath : placeholderCard,
+                            Metadata = null
+                        };
+                        models.Add(model);
                     }
                 }
-                models.Add(model);
             }
             dialog.Close();
             // Populate baseModel filter
@@ -348,6 +432,33 @@ namespace ModelManager
             cmbBaseModel.Items.Add("All"); // Add 'All' option
             cmbBaseModel.Items.AddRange(baseModels.ToArray());
             cmbBaseModel.SelectedIndex = 0;
+            DisplayModels(models);
+        }
+
+        private void SortModels(ModelSortOrder order)
+        {
+            currentSortOrder = order;
+            switch (order)
+            {
+                case ModelSortOrder.FilenameAsc:
+                    models = models.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
+                    break;
+                case ModelSortOrder.FilenameDesc:
+                    models = models.OrderByDescending(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
+                    break;
+                case ModelSortOrder.DateAsc:
+                    models = models.OrderBy(m => File.Exists(m.FilePath) ? File.GetLastWriteTime(m.FilePath) : DateTime.MinValue).ToList();
+                    break;
+                case ModelSortOrder.DateDesc:
+                    models = models.OrderByDescending(m => File.Exists(m.FilePath) ? File.GetLastWriteTime(m.FilePath) : DateTime.MinValue).ToList();
+                    break;
+                case ModelSortOrder.SizeAsc:
+                    models = models.OrderBy(m => File.Exists(m.FilePath) ? new FileInfo(m.FilePath).Length : 0L).ToList();
+                    break;
+                case ModelSortOrder.SizeDesc:
+                    models = models.OrderByDescending(m => File.Exists(m.FilePath) ? new FileInfo(m.FilePath).Length : 0L).ToList();
+                    break;
+            }
             DisplayModels(models);
         }
 
@@ -395,8 +506,26 @@ namespace ModelManager
                     }
                 }
             };
+            // --- Sort submenu ---
+            var sortMenu = new ToolStripMenuItem("Sort Models");
+            var sortByFilename = new ToolStripMenuItem("By Filename (A-Z)");
+            sortByFilename.Click += (s, e) => SortModels(ModelSortOrder.FilenameAsc);
+            var sortByFilenameDesc = new ToolStripMenuItem("By Filename (Z-A)");
+            sortByFilenameDesc.Click += (s, e) => SortModels(ModelSortOrder.FilenameDesc);
+            var sortByDate = new ToolStripMenuItem("By Modification Date (Newest)");
+            sortByDate.Click += (s, e) => SortModels(ModelSortOrder.DateDesc);
+            var sortByDateAsc = new ToolStripMenuItem("By Modification Date (Oldest)");
+            sortByDateAsc.Click += (s, e) => SortModels(ModelSortOrder.DateAsc);
+            var sortBySize = new ToolStripMenuItem("By Filesize (Largest)");
+            sortBySize.Click += (s, e) => SortModels(ModelSortOrder.SizeDesc);
+            var sortBySizeAsc = new ToolStripMenuItem("By Filesize (Smallest)");
+            sortBySizeAsc.Click += (s, e) => SortModels(ModelSortOrder.SizeAsc);
+            sortMenu.DropDownItems.AddRange(new ToolStripItem[] { sortByFilename, sortByFilenameDesc, sortByDate, sortByDateAsc, sortBySize, sortBySizeAsc });
+            // ---
             modelContextMenu.Items.Add(openCivitaiItem);
             modelContextMenu.Items.Add(deleteModelItem);
+            modelContextMenu.Items.Add(new ToolStripSeparator());
+            modelContextMenu.Items.Add(sortMenu);
         }
 
         private void trackModelScale_Scroll(object sender, EventArgs e)
@@ -430,19 +559,33 @@ namespace ModelManager
             currentModel = model;
             if (model.Metadata == null)
             {
+                groupModelInfo.Text = "Model Info";
                 webModelInfo.DocumentText = "<b>No metadata available.</b>";
                 return;
             }
             // Extract top-level fields
             string id = model.Metadata.TryGetValue("id", out var idObj) ? idObj?.ToString() ?? "" : "";
             string modelId = model.Metadata.TryGetValue("modelId", out var modelIdObj) ? modelIdObj?.ToString() ?? "" : "";
-            string name = model.Metadata.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "" : "";
+            string name = model.Metadata.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "" : model.Name;          
+
             string createdAt = model.Metadata.TryGetValue("createdAt", out var createdAtObj) ? createdAtObj?.ToString() ?? "" : "";
             string updatedAt = model.Metadata.TryGetValue("updatedAt", out var updatedAtObj) ? updatedAtObj?.ToString() ?? "" : "";
             string publishedAt = model.Metadata.TryGetValue("publishedAt", out var publishedAtObj) ? publishedAtObj?.ToString() ?? "" : "";
             string baseModel = model.Metadata.TryGetValue("baseModel", out var baseModelObj) ? baseModelObj?.ToString() ?? "" : "";
             string baseModelType = model.Metadata.TryGetValue("baseModelType", out var baseModelTypeObj) ? baseModelTypeObj?.ToString() ?? "" : "";
-            
+
+            // File size
+            string fileSizeStr = "";
+            try
+            {
+                if (File.Exists(model.FilePath))
+                {
+                    long fileSize = new FileInfo(model.FilePath).Length;
+                    fileSizeStr = fileSize >= 1024 * 1024 ? $"{fileSize / (1024.0 * 1024.0):F2} MB" : fileSize >= 1024 ? $"{fileSize / 1024.0:F2} KB" : $"{fileSize} bytes";
+                }
+            }
+            catch { fileSizeStr = ""; }
+
             // Extract nested model info
             string modelName = "", modelType = "", modelDescription = "", modelTags = "", modelNSFW = "", modelPOI = "", allowNoCredit = "", allowCommercialUse = "", allowDerivatives = "", allowDifferentLicense = "";
 
@@ -502,12 +645,13 @@ namespace ModelManager
             </style>
             </head><body>
             <div class='container'>
-              <h2>Model Info</h2>
+              <h2>{modelName}</h2>
               <div class='civitai-link'>{civitaiLink}</div>
               <table>
                 <tr><td><b>ID</b></td><td>{id}</td></tr>
                 <tr><td><b>Model ID</b></td><td>{modelId}</td></tr>
                 <tr><td><b>Name</b></td><td>{name}</td></tr>
+                <tr><td><b>Filesize</b></td><td>{fileSizeStr}</td></tr>
                 <tr><td><b>Created At</b></td><td>{createdAt}</td></tr>
                 <tr><td><b>Updated At</b></td><td>{updatedAt}</td></tr>
                 <tr><td><b>Published At</b></td><td>{publishedAt}</td></tr>
