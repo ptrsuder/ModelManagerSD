@@ -573,6 +573,13 @@ namespace ModelManager
             string publishedAt = model.Metadata.TryGetValue("publishedAt", out var publishedAtObj) ? publishedAtObj?.ToString() ?? "" : "";
             string baseModel = model.Metadata.TryGetValue("baseModel", out var baseModelObj) ? baseModelObj?.ToString() ?? "" : "";
             string baseModelType = model.Metadata.TryGetValue("baseModelType", out var baseModelTypeObj) ? baseModelTypeObj?.ToString() ?? "" : "";
+            model.Metadata.TryGetValue("trainedWords", out var triggerWordsObj);
+            string triggerWords = "";
+            if(triggerWordsObj != null)
+            {
+                var arr = ((JsonElement)triggerWordsObj).EnumerateArray();
+                triggerWords = arr.FirstOrDefault().ToString();
+            }
 
             // File size
             string fileSizeStr = "";
@@ -663,8 +670,8 @@ namespace ModelManager
               <table>
                 <tr><td><b>Name</b></td><td>{modelName}</td></tr>
                 <tr><td><b>Type</b></td><td>{modelType}</td></tr>
-                <tr><td><b>NSFW</b></td><td>{modelNSFW}</td></tr>
-                <tr><td><b>POI</b></td><td>{modelPOI}</td></tr>
+                <tr><td><b>Trigger Keywords</b></td><td>{triggerWords}</td></tr>
+                <tr><td></td><td></td></tr>                                
                 <tr><td><b>Tags</b></td><td>{modelTags}</td></tr>
                 <tr><td><b>Allow No Credit</b></td><td>{allowNoCredit}</td></tr>
                 <tr><td><b>Allow Commercial Use</b></td><td>{allowCommercialUse}</td></tr>
