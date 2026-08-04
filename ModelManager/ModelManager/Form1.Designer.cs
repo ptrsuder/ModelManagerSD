@@ -38,6 +38,7 @@
             dtpCreatedAfter = new DateTimePicker();
             cmbBaseModel = new ComboBox();
             panelTop = new Panel();
+            injectTagsMd_button = new Button();
             txtModelNameFilter = new TextBox();
             ((System.ComponentModel.ISupportInitialize)splitMain).BeginInit();
             splitMain.Panel1.SuspendLayout();
@@ -147,6 +148,7 @@
             // panelTop
             // 
             panelTop.BackColor = Color.FromArgb(245, 245, 245);
+            panelTop.Controls.Add(injectTagsMd_button);
             panelTop.Controls.Add(txtModelNameFilter);
             panelTop.Controls.Add(btnSelectFolder);
             panelTop.Controls.Add(chkSearchSubfolders);
@@ -158,6 +160,16 @@
             panelTop.Name = "panelTop";
             panelTop.Size = new Size(916, 98);
             panelTop.TabIndex = 3;
+            // 
+            // injectTagsMd_button
+            // 
+            injectTagsMd_button.Location = new Point(676, 14);
+            injectTagsMd_button.Name = "injectTagsMd_button";
+            injectTagsMd_button.Size = new Size(94, 52);
+            injectTagsMd_button.TabIndex = 6;
+            injectTagsMd_button.Text = "Inject tags metadata";
+            injectTagsMd_button.UseVisualStyleBackColor = true;
+            injectTagsMd_button.Click += injectTagsMd_button_Click;
             // 
             // txtModelNameFilter
             // 
@@ -200,5 +212,6 @@
         private System.Windows.Forms.TrackBar trackModelScale;
         private System.Windows.Forms.Panel panelTop;
         private TextBox txtModelNameFilter;
+        private Button injectTagsMd_button;
     }
 }

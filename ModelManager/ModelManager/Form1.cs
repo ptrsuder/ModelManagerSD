@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using ModelManagerSD;
 
 namespace ModelManager
 {
@@ -20,7 +21,7 @@ namespace ModelManager
         private ContextMenuStrip modelContextMenu;
         private ModelInfo? contextModel;
         private ModelInfo? currentModel;
-        private System.Windows.Forms.Timer trackbarTimer;     
+        private System.Windows.Forms.Timer trackbarTimer;
 
         private static readonly string NoInfoMarker = "{\"no_model_info\":true}";
 
@@ -42,7 +43,8 @@ namespace ModelManager
                 modelItemSize = new Size(thumbW + 12, thumbW + 42);
                 UpdateModelItemSizes();
             };
-            trackModelScale.Scroll += (s, e) => {
+            trackModelScale.Scroll += (s, e) =>
+            {
                 trackbarTimer.Stop();
                 trackbarTimer.Start();
             };
@@ -52,7 +54,7 @@ namespace ModelManager
 
             // Model name filter textbox           
             txtModelNameFilter.PlaceholderText = "Model name";
-            txtModelNameFilter.TextChanged += (s, e) => ApplyFilters();           
+            txtModelNameFilter.TextChanged += (s, e) => ApplyFilters();
 
             // Remove btnFilter from panelTop and Form1 controls
             // Add event handlers to filter controls
@@ -64,7 +66,7 @@ namespace ModelManager
             panelTop.Controls.Add(chkSearchSubfolders);
             panelTop.Controls.Add(dtpCreatedAfter);
             panelTop.Controls.Add(cmbBaseModel);
-            panelTop.Controls.Add(trackModelScale);          
+            panelTop.Controls.Add(trackModelScale);
 
             groupModelInfo.Resize += (s, e) => ShowModelInfo(currentModel);
         }
@@ -181,7 +183,7 @@ namespace ModelManager
                         }
                         catch { thumb = null; }
                     }
-                }               
+                }
                 var panel = new Panel
                 {
                     Width = modelItemSize.Width,
@@ -199,7 +201,7 @@ namespace ModelManager
                     Top = 0,
                     Left = 6
                 };
-                pb.Click += (s, e) => ShowModelInfo(model);                
+                pb.Click += (s, e) => ShowModelInfo(model);
                 pb.MouseUp += (s, e) =>
                 {
                     if (e.Button == MouseButtons.Right)
@@ -390,7 +392,8 @@ namespace ModelManager
                             current++;
                             progressValue = current;
                         }
-                        dialog.Invoke(new Action(() => {
+                        dialog.Invoke(new Action(() =>
+                        {
                             dialog.ProgressBar.Value = progressValue;
                             dialog.StatusLabel.Text = $"Processing {progressValue} of {total}: {Path.GetFileName(file)}";
                         }));
@@ -566,7 +569,7 @@ namespace ModelManager
             // Extract top-level fields
             string id = model.Metadata.TryGetValue("id", out var idObj) ? idObj?.ToString() ?? "" : "";
             string modelId = model.Metadata.TryGetValue("modelId", out var modelIdObj) ? modelIdObj?.ToString() ?? "" : "";
-            string name = model.Metadata.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "" : model.Name;          
+            string name = model.Metadata.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "" : model.Name;
 
             string createdAt = model.Metadata.TryGetValue("createdAt", out var createdAtObj) ? createdAtObj?.ToString() ?? "" : "";
             string updatedAt = model.Metadata.TryGetValue("updatedAt", out var updatedAtObj) ? updatedAtObj?.ToString() ?? "" : "";
@@ -575,7 +578,7 @@ namespace ModelManager
             string baseModelType = model.Metadata.TryGetValue("baseModelType", out var baseModelTypeObj) ? baseModelTypeObj?.ToString() ?? "" : "";
             model.Metadata.TryGetValue("trainedWords", out var triggerWordsObj);
             string triggerWords = "";
-            if(triggerWordsObj != null)
+            if (triggerWordsObj != null)
             {
                 var arr = ((JsonElement)triggerWordsObj).EnumerateArray();
                 triggerWords = arr.FirstOrDefault().ToString();
@@ -670,7 +673,7 @@ namespace ModelManager
               <table>
                 <tr><td><b>Name</b></td><td>{modelName}</td></tr>
                 <tr><td><b>Type</b></td><td>{modelType}</td></tr>
-                <tr><td><b>Trigger Keywords</b></td><td>{triggerWords}</td></tr>
+                <tr><td><b>Trigger Keyword</b></td><td>{triggerWords}</td></tr>
                 <tr><td></td><td></td></tr>                                
                 <tr><td><b>Tags</b></td><td>{modelTags}</td></tr>
                 <tr><td><b>Allow No Credit</b></td><td>{allowNoCredit}</td></tr>
@@ -702,5 +705,24 @@ namespace ModelManager
             int y = this.Location.Y + (this.Height - dialog.Height) / 2;
             return new Point(Math.Max(x, 0), Math.Max(y, 0));
         }
-    }   
+
+        private void injectTagsMd_button_Click(object sender, EventArgs e)
+        {
+            if (currentModel == null) return;
+
+            FolderBrowserDialog dialog = new FolderBrowserDialog();
+            dialog.Description = "Select Dataset Folder";
+            var datasetFolder = dialog.ShowDialog();
+            if (string.IsNullOrEmpty(dialog.SelectedPath)) return;
+
+            var injector = new SafetensorsMetadataInjector();
+            var tags = injector.ParseCaptions(dialog.SelectedPath);
+            injector.InjectMetadata(
+                currentModel.FilePath,
+                currentModel.FilePath.Replace(currentModel.Name, currentModel.Name + "_tags"),
+                tags);
+
+            
+        }
+    }
 }
